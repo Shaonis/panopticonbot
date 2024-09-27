@@ -12,7 +12,7 @@ type TaskData = (CancellationToken, Instant);
 pub struct Scheduler {
     tasks: Arc<RwLock<HashMap<TaskId, TaskData>>>,
     task_duration: Duration,
-    start_token: Arc<RwLock<CancellationToken>>,
+    start_token: CancellationToken,
 }
 
 impl Scheduler {
@@ -20,7 +20,7 @@ impl Scheduler {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             task_duration,
-            start_token: Arc::new(RwLock::new(CancellationToken::new())),
+            start_token: CancellationToken::new(),
         }
     }
 
@@ -37,14 +37,12 @@ impl Scheduler {
             let mut tasks = self.tasks.write().unwrap();
             tasks.insert(task_id, (token_clone, timestamp));
         }
-        let start_token = self.start_token.read().unwrap().clone();
-
         tokio::spawn(Self::task_wrapper(
             task(),
             self.task_duration,
             // Control tokens
             cancel_token,
-            start_token,
+            self.start_token.clone(),
             // For self removal
             self.tasks.clone(),
             task_id,
@@ -63,15 +61,17 @@ impl Scheduler {
         false
     }
 
-    pub fn complete_all(&self) {
-        let mut start_token = self.start_token.write().unwrap();
-        start_token.cancel();
-        {
-            let mut tasks = self.tasks.write().unwrap();
-            tasks.clear();
-        }
+    pub async fn complete_all(&mut self) {
+        self.start_token.cancel();
+        self.start_token = CancellationToken::new();
         tracing::info!("Completion of all tasks...");
-        *start_token = CancellationToken::new();
+        loop {
+            {
+                let tasks = self.tasks.read().unwrap();
+                if tasks.is_empty() { break; }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn task_wrapper<F>(
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_all() {
-        let scheduler = Scheduler::new(Duration::from_secs(10));
+        let mut scheduler = Scheduler::new(Duration::from_secs(10));
         let counter = Arc::new(RwLock::new(0));
         let task_ids = vec![1, 2, 3];
 
@@ -163,11 +163,10 @@ mod tests {
                 *count += 1;
             });
         }
-        scheduler.complete_all();
+        scheduler.complete_all().await;
         for task_id in task_ids {
             assert_eq!(scheduler.cancel_task(task_id), false);
         }
-        sleep(Duration::from_secs(3)).await;
         let final_count = *counter.read().unwrap();
         assert_eq!(final_count, 3);
     }
