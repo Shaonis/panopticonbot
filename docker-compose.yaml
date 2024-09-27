@@ -1,0 +1,23 @@
+services:
+  main:
+    container_name: panopticonbot
+    image: panopticonbot
+    env_file: .env
+    restart: "unless-stopped"
+    volumes:
+        - "/opt/panopticonbot/sqlite:/app/sqlite/"
+#    ports:  # Uncomment this if you want to expose the port for webhook
+#      - "WEBHOOK_PORT:WEBHOOK_PORT"
+    depends_on:
+      redis:
+        condition: service_healthy
+  redis:
+    container_name: panopticon_redis
+    image: "redis:7.2.5-bookworm"
+    restart: "unless-stopped"
+    volumes:
+      - "/opt/panopticonbot/redis/data:/data"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "set", "ping", "pong" ]
+      interval: 10s
+      start_period: 2s

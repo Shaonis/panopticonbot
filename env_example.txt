@@ -1,0 +1,21 @@
+### Required ###
+BOT_TOKEN={BOT TOKEN}
+FORUM_ID={FORUM ID with -100 prefix}
+SQLITE_PATH={PATH TO SQLITE DB FILE}
+REDIS_URL={REDIS URL}
+START_COMMAND="{TEXT FOR START COMMAND}"
+HELP_COMMAND="{TEXT FOR HELP COMMAND}"
+
+### Optional ###
+WEBHOOK_URL={WEBHOOK URL}
+WEBHOOK_LISTENER={WHICH ADDRESS THE BOT WILL LISTEN TO}
+
+### Example ###
+BOT_TOKEN=123456789:AAEQIi5ZhwXuQnwHg0Po6povuMMcC99Vcpc
+FORUM_ID=-100123456789
+SQLITE_PATH=sqlite/database.db
+REDIS_URL=redis://localhost:6379/0
+START_COMMAND="Hello, ask a question and we will try to answer it as soon as possible!"
+HELP_COMMAND="All your messages that we write are sent to us. If you need anything, write to us and we will respond"
+WEBHOOK_URL=https://b4d2-92-249-96-53.ngrok-free.app  # ngrok url to 9000 port
+WEBHOOK_LISTENER=0.0.0.0:9000

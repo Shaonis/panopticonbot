@@ -1,0 +1,27 @@
+[package]
+name = "panopticonbot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Bot
+tokio = { version = "1.39.3", features = ["full"] }
+teloxide = { version = "0.13.0", features = ["macros", "webhooks-axum"] }
+# Databases
+sqlx = { version = "0.8.1", features = ["runtime-tokio", "sqlite", "macros"] }
+redis = { version = "0.26.1", features = ["aio", "tokio-comp", "connection-manager"] }
+# Logging
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+# Serde
+serde = { version = "1.0.208", features = ["derive"] }
+serde_json = "1.0.127"
+# Config
+dotenv = "0.15.0"
+config = "0.14.0"
+# Misc
+thiserror = "1.0.63"
+rand = "0.8.5"
+tokio-util = "0.7.12"
+secrecy = { version = "0.10.2", features = ["serde"] }
+url = "2.5.2"
