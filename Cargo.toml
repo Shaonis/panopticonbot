@@ -17,7 +17,7 @@ tracing-subscriber = "0.3.18"
 serde = { version = "1.0.208", features = ["derive"] }
 serde_json = "1.0.127"
 # Config
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 config = "0.14.0"
 # Misc
 thiserror = "1.0.63"

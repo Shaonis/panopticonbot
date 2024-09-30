@@ -10,7 +10,6 @@ use teloxide::{
         InlineKeyboardMarkup, 
         LinkPreviewOptions, 
         MessageId, 
-        Recipient, 
         ReplyParameters, 
         ThreadId,
     },
@@ -40,20 +39,23 @@ static HELP_COMMAND: LazyLock<String> = LazyLock::new(|| {
     env::var("HELP_COMMAND").expect("env var HELP_COMMAND must be set")
 });
 
-#[derive(BotCommands, Clone, Debug)]
+#[derive(BotCommands, Clone)]
 #[command(rename_rule = "snake_case")]
-enum PublicCommand {
+pub enum PublicCommand {
     /// Start
+    #[command(description = "start")]
     Start,
     /// Help
+    #[command(description = "help")]
     Help,
 }
 
-#[derive(BotCommands, Clone, Debug)]
+#[derive(BotCommands, Clone)]
 #[command(rename_rule = "snake_case")]
-enum AdminCommand {
+pub enum AdminCommand {
     /// Drop topic
-    DropTopic,
+    #[command(description = "Drop the current topic")]
+    DropTopic(String),
 }
 
 pub fn handler_schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -110,13 +112,13 @@ async fn private_handler(
     scheduler: Scheduler,
 ) -> HandlerResult {
     if db.check_ban(msg.chat.id.0).await? {
-        /* Do nothing */
+        return Ok(());
     }
-    else if let Some(mut mapping) = db.get_mapping(msg.chat.id.0).await.ok().flatten() {
-        let thread_id = ThreadId(MessageId(mapping.recipient_chat as i32));
+    if let Some(mut mapping) = db.get_mapping(msg.chat.id.0).await.ok().flatten() {
+        let thread_id = ThreadId(MessageId(mapping.recipient_chat.0 as i32));
         let last_topic = if let Some(reply_msg) = msg.reply_to_message() {
             let shift = msg.id.0 - reply_msg.id.0 - 1;
-            let reply_msg_id = MessageId(mapping.last_topic - shift);
+            let reply_msg_id = MessageId(mapping.last_topic.0 - shift);
             bot.copy_message(forum_id, msg.chat.id, msg.id)
                 .message_thread_id(thread_id)
                 .reply_parameters(ReplyParameters::new(reply_msg_id))
@@ -126,7 +128,7 @@ async fn private_handler(
                 .message_thread_id(thread_id)
                 .await?
         };
-        mapping.sync(msg.id.0, last_topic.0);
+        mapping.sync(msg.id, last_topic);
         db.sync_mapping(mapping, scheduler).await?;
     } else {
         create_new_topic(bot, msg, db, forum_id).await?;
@@ -150,21 +152,20 @@ async fn topic_handler(
         tracing::warn!("Mapping not configured: {thread_id}");
         "Mapping not configured"
     })?;
-    let recipient_chat = Recipient::Id(ChatId(mapping.recipient_chat));
+    let with_reply = msg.reply_to_message()
+        .map_or(false, |reply| reply.id.0 != thread_id);
     
-    let without_reply = msg.reply_to_message()
-        .map_or(true, |reply| reply.id.0 == thread_id);
-    let last_private = if without_reply {
-        bot.copy_message(recipient_chat, msg.chat.id, msg.id).await?
-    } else {
+    let last_private = if with_reply {
         let reply_to_message_id = msg.reply_to_message().expect("infallible").id.0;
         let shift = msg.id.0 - reply_to_message_id - 1;
-        let reply_msg_id = MessageId(mapping.last_private - shift);
-        bot.copy_message(recipient_chat, msg.chat.id, msg.id)
+        let reply_msg_id = MessageId(mapping.last_private.0 - shift);
+        bot.copy_message(mapping.recipient_chat, msg.chat.id, msg.id)
             .reply_parameters(ReplyParameters::new(reply_msg_id))
             .await?
+    } else {
+        bot.copy_message(mapping.recipient_chat, msg.chat.id, msg.id).await?
     };
-    mapping.sync(last_private.0, msg.id.0);
+    mapping.sync(last_private, msg.id);
     db.sync_mapping(mapping, scheduler).await?;
 
     Ok(())
@@ -172,27 +173,40 @@ async fn topic_handler(
 
 #[instrument(
     name = "Admin command handler",
-    skip(bot, msg, forum_id, db, scheduler),
+    skip(bot, msg, cmd, forum_id, db, scheduler),
 )]
 async fn admin_command_handler(
     bot: Bot, 
     msg: Message,
-    // cmd: AdminCommand,  // while 1 command
+    cmd: AdminCommand,  // while 1 command !!!
     forum_id: ChatId, 
     mut db: Database,
     scheduler: Scheduler,
 ) -> HandlerResult {
-    let thread_id = msg.thread_id.expect("infallible");
-    let thread_id_num = thread_id.0.0 as i64;
-    if let Some(mapping) = db.get_mapping(thread_id_num).await? {
-        // Delete mapping
-        let _ = db.drop_mapping(thread_id_num).await;
-        scheduler.cancel_task(mapping.unique_id() as u64); // Cancel scheduled synchronization
-        // Drop topic
-        drop_topic(&bot, forum_id, thread_id, mapping.recipient_chat).await?;
-        bot.send_message(msg.chat.id, "🗑 Topic dropped")
-            .message_thread_id(thread_id).await?;
+    if let AdminCommand::DropTopic(forum_name) = cmd {
+        let thread_id = msg.thread_id.expect("infallible");
+        if forum_name.is_empty() {
+            bot.send_message(
+                msg.chat.id, 
+                "⚠️ Please, specify a new topic name,\nf.e. /drop_topic {topic_name}"
+            )
+                .message_thread_id(thread_id).await?;
+            return Ok(());
+        }
+        let thread_id_num = thread_id.0.0 as i64;
+        if let Some(mapping) = db.get_mapping(thread_id_num).await? {
+            // Delete mapping
+            let _ = db.drop_mapping(thread_id_num).await;
+            scheduler.cancel_task(mapping.unique_id() as u64); // Cancel scheduled synchronization
+            // Drop topic
+            let forum_name = format!("🗄 {forum_name}");
+            close_topic(&bot, forum_id, thread_id, &forum_name).await?;
+            bot.send_message(msg.chat.id, "🗑 Topic dropped")
+                .message_thread_id(thread_id).await?;
+            tracing::info!("Topic dropped: {}", thread_id.0.0);
+        }
     }
+    
     Ok(())
 }
 
@@ -212,10 +226,11 @@ async fn ban_handler(
     let thread_id = init_msg.thread_id.expect("infallible");
     if let Some(mapping) = db.get_mapping(thread_id.0.0 as i64).await? {
         // Ban user
-        db.ban_user(mapping.recipient_chat).await?;
+        db.ban_user(mapping.recipient_chat.0).await?;
         scheduler.cancel_task(mapping.unique_id() as u64); // Cancel scheduled synchronization
         // Drop topic
-        drop_topic(&bot, forum_id, thread_id, mapping.recipient_chat).await?;
+        let topic_name = format!("🚫 {}", mapping.recipient_chat);
+        close_topic(&bot, forum_id, thread_id, &topic_name).await?;
         bot.send_message(init_msg.chat.id, "🚫 The user was blocked")
             .message_thread_id(thread_id)
             .await?;
@@ -224,7 +239,7 @@ async fn ban_handler(
             .text("♨️ Successfully banned!")
             .show_alert(true)
             .await?;
-        tracing::info!("User banned: {}", mapping.recipient_chat);
+        tracing::info!("User banned: {}", mapping.recipient_chat.0);
     }
     bot.edit_message_reply_markup(forum_id, init_msg.id)
         .reply_markup(InlineKeyboardMarkup::default())
@@ -272,25 +287,30 @@ async fn create_new_topic(
     let last_topic = bot.copy_message(forum_id, msg.chat.id, msg.id)
         .message_thread_id(topic.thread_id)
         .await?;
-
-    let chat_mapping = MappingChat::new(
-        msg.chat.id.0,
-        topic.thread_id.0.0 as i64,
-        msg.id.0,
-        last_topic.0,
+    
+    let topic_chat = ChatId(topic.thread_id.0.0 as i64);
+    let mapping = MappingChat::new(
+        msg.chat.id,
+        topic_chat,
+        msg.id,
+        last_topic,
     );
-    db.save_mapping(chat_mapping).await?;
-    tracing::info!("New topic created: {}", topic.thread_id.0.0);
+    db.save_mapping(mapping).await?;
+    tracing::info!("New topic created: {}", topic_chat.0);
 
     Ok(())
 }
 
-async fn drop_topic(bot: &Bot, forum_id: ChatId, thread_id: ThreadId, private_chat: i64) -> HandlerResult {
+async fn close_topic(
+    bot: &Bot,
+    forum_id: ChatId,
+    thread_id: ThreadId,
+    forum_name: &str,
+) -> HandlerResult {
     bot.close_forum_topic(forum_id, thread_id).await?;
     bot.edit_forum_topic(forum_id, thread_id)
-        .name(format!("🗑 {}", private_chat))
+        .name(forum_name)
         .await?;
-    tracing::info!("Topic dropped: {}", thread_id.0.0);
 
     Ok(())
 }

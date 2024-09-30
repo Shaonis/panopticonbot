@@ -8,6 +8,15 @@ use tokio_util::sync::CancellationToken;
 type TaskId = u64;
 type TaskData = (CancellationToken, Instant);
 
+/// A `Scheduler` for managing tasks with a configurable timeout.
+/// Tasks are added and can be cancelled or automatically removed after a certain duration.
+/// The scheduler uses cancellation tokens to manage task execution.
+///
+/// # Fields
+///
+/// * `tasks` - A map of task IDs to task data.
+/// * `task_duration` - Time after which the task will start execution.
+/// * `start_token` - A token used to control the startup of all tasks.
 #[derive(Clone)]
 pub struct Scheduler {
     tasks: Arc<RwLock<HashMap<TaskId, TaskData>>>,
@@ -16,6 +25,11 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Creates a new `Scheduler` with a specified task duration.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_duration` - The duration each task is allowed to run before completion.
     pub fn new(task_duration: Duration) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -24,14 +38,23 @@ impl Scheduler {
         }
     }
 
+    /// Adds a new task to the scheduler.
+    /// If a task with the same ID already exists, it will be cancelled and replaced.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - The ID of the task.
+    /// * `task` - A closure that returns a `Future`, representing the task logic.
     pub fn add_task<F, Fut>(&self, task_id: TaskId, task: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let old_task = self.cancel_task(task_id);
+        // Create a new cancellation token for this task
         let cancel_token = CancellationToken::new();
         let token_clone = cancel_token.clone();
+        // Is needed in a task to delete one's token after completion
         let timestamp = Instant::now();
         {
             let mut tasks = self.tasks.write().unwrap();
@@ -43,30 +66,41 @@ impl Scheduler {
             // Control tokens
             cancel_token,
             self.start_token.clone(),
-            // For self removal
+            // For cleanup
             self.tasks.clone(),
             task_id,
             timestamp,
         ));
-        if old_task { tracing::info!("Task updated: {task_id}");
-        } else { tracing::info!("Added task: {task_id}"); }
+
+        if old_task {
+            tracing::info!("Task updated: {task_id}");
+        } else {
+            tracing::info!("Added task: {task_id}");
+        }
     }
 
+    /// Cancels a task by its ID.
+    /// Returns `true` if the task was successfully cancelled, `false` if no such task exists.
     pub fn cancel_task(&self, task_id: TaskId) -> bool {
-        let mut tasks = self.tasks.write().unwrap();
-        if let Some((token, _)) = tasks.remove(&task_id) {
+        let tasks = self.tasks.read().unwrap();
+        if let Some((token, _)) = tasks.get(&task_id) {
             token.cancel();
             return true;
         }
         false
     }
 
+    /// Completes all tasks, canceling the shared start_token and replacing it with a new one.
+    /// Waits until all tasks are either completed or canceled.
     pub async fn complete_all(&mut self) {
+        // Canceling the start token gives all tasks a signal to start executing
         self.start_token.cancel();
         self.start_token = CancellationToken::new();
         tracing::info!("Completion of all tasks...");
+
+        // Wait until the task map is empty, indicating all tasks have finished
         loop {
-            {
+            { // Additional scope to not take away map access permanently
                 let tasks = self.tasks.read().unwrap();
                 if tasks.is_empty() { break; }
             }
@@ -74,6 +108,18 @@ impl Scheduler {
         }
     }
 
+    /// Internal function to wrap task execution logic.
+    /// Handles cancellation and ensures task cleanup after execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task to execute.
+    /// * `task_duration` - The duration after which the task is forcefully completed.
+    /// * `cancel_token` - Token to cancel this specific task.
+    /// * `start_token` - The token to start this task.
+    /// * `tasks` - Shared reference to the task map.
+    /// * `task_id` - The ID of the task.
+    /// * `task_timestamp` - The timestamp of when the task was added.
     async fn task_wrapper<F>(
         task: F,
         task_duration: Duration,
@@ -87,14 +133,17 @@ impl Scheduler {
         F: Future<Output = ()> + Send + 'static,
     {
         select! {
-            _ = cancel_token.cancelled() => {}
-            _ = start_token.cancelled() => { task.await; }
-            _ = sleep(task_duration) => { task.await; }
+            _ = cancel_token.cancelled() => {},
+            _ = start_token.cancelled() => { task.await; },
+            _ = sleep(task_duration) => { task.await; },
         }
+        
+        // Task is required to delete its id after completion
         let mut tasks = tasks.write().unwrap();
         if let Some((_, timestamp)) = tasks.get(&task_id) {
-            // Task is required to delete its id after completion,
-            // but when adding a task, the old task should not undo the new one
+            // When adding a task, the old task should not cancel the new task,
+            // the old task may not have time to complete
+            // before the cancel_token is replaced with the new one
             if *timestamp == task_timestamp {
                 tasks.remove(&task_id);
             }

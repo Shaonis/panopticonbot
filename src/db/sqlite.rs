@@ -45,19 +45,17 @@ impl Database {
 
     pub async fn save_mapping(&mut self, mapping: MappingChat) -> errors::Result<()> {
         self.redis_cache.save_mapping(mapping).await?;
+        let (sender_chat, recipient_chat, last_private, last_topic) = mapping.into();
         sqlx::query(
             r#"
                INSERT INTO mapping (private_chat, topic_chat, last_private, last_topic)
                VALUES (?, ?, ?, ?)
-               ON CONFLICT (private_chat) DO UPDATE SET
-                   last_private = excluded.last_private,
-                   last_topic = excluded.last_topic;
                "#
         )
-            .bind(mapping.sender_chat)
-            .bind(mapping.recipient_chat)
-            .bind(mapping.last_private)
-            .bind(mapping.last_topic)
+            .bind(sender_chat)
+            .bind(recipient_chat)
+            .bind(last_private)
+            .bind(last_topic)
             .execute(&self.pool)
             .await?;
 
@@ -70,6 +68,7 @@ impl Database {
         // there will be no database query spam!
         let pool = self.pool.clone();
         let task_id = mapping.unique_id() as u64;
+        let (sender_chat, _, last_private, last_topic) = mapping.into();
         scheduler.add_task(task_id, move || async move {
             let _ = sqlx::query(
                 r#"
@@ -78,10 +77,10 @@ impl Database {
                    WHERE private_chat = ? OR topic_chat = ?;
                    "#
             )
-                .bind(mapping.last_private)
-                .bind(mapping.last_topic)
-                .bind(mapping.sender_chat)
-                .bind(mapping.sender_chat)
+                .bind(last_private)
+                .bind(last_topic)
+                .bind(sender_chat)
+                .bind(sender_chat)
                 .execute(&pool)
                 .await;
             tracing::info!("Successfully synchronized mapping: {task_id}");
@@ -96,22 +95,31 @@ impl Database {
         }
         let mapping = sqlx::query(
             r#"
-               SELECT private_chat, topic_chat, last_private, last_topic
-               FROM mapping
-               WHERE private_chat = ? OR topic_chat = ?;
-               "#
+           SELECT
+               CASE
+                   WHEN private_chat = ? THEN topic_chat
+                   ELSE private_chat
+               END AS recipient_chat,
+               last_private,
+               last_topic
+           FROM mapping
+           WHERE private_chat = ? OR topic_chat = ?;
+        "#
         )
+            .bind(chat_id)
             .bind(chat_id)
             .bind(chat_id)
             .fetch_optional(&self.pool)
             .await
             .map(|row| {
-                row.map(|row| MappingChat {
-                    sender_chat: row.get(0),
-                    recipient_chat: row.get(1),
-                    last_private: row.get(2),
-                    last_topic: row.get(3),
-                })
+                row.map(|row|
+                    MappingChat::from((
+                        chat_id,
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                    ))
+                )
             })?;
 
         if let Some(mapping) = mapping {
@@ -163,7 +171,7 @@ impl Database {
 
     pub async fn check_ban(&mut self, private_chat: i64) -> errors::Result<bool> {
         if let Some(banned) = self.redis_cache.check_ban(private_chat).await.ok().flatten() {
-            if banned {
+            if banned {  // auto caching extension
                 self.redis_cache.ban_user(private_chat).await?;
             }
             return Ok(banned);
@@ -205,13 +213,8 @@ mod tests {
     #[tokio::test]
     async fn test_save_mapping() {
         let mut db = setup_sqlite().await;
-
-        let mapping = MappingChat {
-            sender_chat: 1,
-            recipient_chat: 2,
-            last_private: 3,
-            last_topic: 4,
-        };
+        let mapping = MappingChat::from((1, 2, 3, 4));
+        
         db.save_mapping(mapping).await.expect("Failed to save mapping");
         let first_mapping = db.get_mapping(1)
             .await
@@ -230,13 +233,8 @@ mod tests {
     #[tokio::test]
     async fn test_drop_mapping() {
         let mut db = setup_sqlite().await;
+        let mapping = MappingChat::from((5, 6, 7, 8));
 
-        let mapping = MappingChat {
-            sender_chat: 5,
-            recipient_chat: 6,
-            last_private: 7,
-            last_topic: 8,
-        };
         let fetched_mapping = db.get_mapping(6).await;
         assert!(fetched_mapping.is_ok_and(|m| m.is_none()));
         db.save_mapping(mapping).await.expect("Failed to save mapping");
@@ -248,13 +246,8 @@ mod tests {
     #[tokio::test]
     async fn test_ban_user() {
         let mut db = setup_sqlite().await;
+        let mapping = MappingChat::from((9, 10, 11, 12));
         
-        let mapping = MappingChat {
-            sender_chat: 9,
-            recipient_chat: 10,
-            last_private: 11,
-            last_topic: 12,
-        };
         let _ = db.save_mapping(mapping).await;
         let banned = db.check_ban(9).await.expect("Failed to check ban");
         assert!(!banned);

@@ -1,5 +1,5 @@
 use teloxide::adaptors::DefaultParseMode;
-use teloxide::types::{BotCommand, BotCommandScope, ParseMode, Recipient};
+use teloxide::types::{BotCommandScope, ParseMode, Recipient};
 use teloxide::update_listeners::UpdateListener;
 use teloxide::{
     prelude::*,
@@ -8,11 +8,12 @@ use teloxide::{
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use secrecy::ExposeSecret;
-use handlers::handler_schema;
+use handlers::{handler_schema, PublicCommand, AdminCommand};
 use db::{Database, RedisAPI};
+use url::Url;
 pub use config::Settings;
 pub use scheduler::Scheduler;
-use url::Url;
+use teloxide::utils::command::BotCommands;
 
 mod errors;
 mod config;
@@ -64,17 +65,10 @@ async fn setup_listener(bot: Bot, webhook_url: Url, webhook_listener: SocketAddr
 }
 
 async fn set_bot_commands(bot: &Bot, forum_id: ChatId) -> Result<(), Box<dyn std::error::Error>> {
-    let private_commands = vec![
-        BotCommand::new("start", "start"),
-        BotCommand::new("help", "help"),
-    ];
-    let admin_commands = vec![
-        BotCommand::new("drop_topic", "Drop the current topic"),
-    ];
-    bot.set_my_commands(private_commands)
+    bot.set_my_commands(PublicCommand::bot_commands())
         .scope(BotCommandScope::AllPrivateChats)
         .await?;
-    bot.set_my_commands(admin_commands)
+    bot.set_my_commands(AdminCommand::bot_commands())
         .scope(BotCommandScope::Chat { chat_id: Recipient::Id(forum_id) })
         .await?;
 
