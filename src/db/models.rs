@@ -1,5 +1,7 @@
 use teloxide::types::{ChatId, MessageId};
 
+type MappingTuple = (i64, i64, i32, i32);
+
 /// Represents a link between chat rooms: a user in private messages and a forum topic.
 /// The values of the `sender_chat` i `recipient_chat` fields can be swapped.
 /// When receiving the structure, `sender_chat` is the initiator.
@@ -37,8 +39,8 @@ impl MappingChat {
     }
 }
 
-impl From<(i64, i64, i32, i32)> for MappingChat {
-    fn from(tuple: (i64, i64, i32, i32)) -> Self {
+impl From<MappingTuple> for MappingChat {
+    fn from(tuple: MappingTuple) -> Self {
         Self {
             sender_chat: ChatId(tuple.0),
             recipient_chat: ChatId(tuple.1),
@@ -48,7 +50,7 @@ impl From<(i64, i64, i32, i32)> for MappingChat {
     }
 }
 
-impl From<MappingChat> for (i64, i64, i32, i32) {
+impl From<MappingChat> for MappingTuple {
     fn from(mapping: MappingChat) -> Self {
         (
             mapping.sender_chat.0, 

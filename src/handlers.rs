@@ -18,7 +18,7 @@ use teloxide::{
 use tracing::instrument;
 use crate::scheduler::Scheduler;
 use std::env;
-use teloxide::types::MessageKind;
+use teloxide::types::{MessageKind, User};
 use std::sync::LazyLock;
 
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -67,23 +67,32 @@ pub fn handler_schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync
             )
             .branch(
                 dptree::filter(|msg: Message| msg.chat.is_private())
+                    .filter_map(|msg: Message| msg.from)
                     .endpoint(private_handler)
             )
             .branch(dptree::entry()
                 .filter_command::<AdminCommand>()
                 .filter(|msg: Message, forum_id: ChatId| msg.chat.id == forum_id)
+                .filter_map(|msg: Message| msg.thread_id)
                 .endpoint(admin_command_handler)
             )
             .branch(dptree::filter(|msg: Message, forum_id: ChatId| {
-                msg.chat.id == forum_id && matches!(msg.kind, 
+                msg.chat.id == forum_id && matches!(msg.kind,
                     MessageKind::Common(_) | MessageKind::Dice(_)
                 )
-            }).endpoint(topic_handler))
+            })
+                .filter_map(|msg: Message| msg.thread_id)
+                .endpoint(topic_handler))
         )
         .branch(Update::filter_callback_query()
             .branch(dptree::filter(|call: CallbackQuery|
                 call.data.map_or(false, |data| data == "ban")
-            ).endpoint(ban_handler))
+            )
+                .filter_map(|call: CallbackQuery|
+                    call.message.and_then(|maybe_msg| maybe_msg.regular_message().cloned())
+                )
+                .filter_map(|msg: Message| msg.thread_id)
+                .endpoint(ban_handler))
         )
 }
 
@@ -102,11 +111,12 @@ async fn public_command_handler(bot: Bot, msg: Message, cmd: PublicCommand) -> H
 
 #[instrument(
     name = "Private chat handler",
-    skip(bot, msg, db, forum_id, scheduler),
+    skip(bot, msg, user, db, forum_id, scheduler),
 )]
 async fn private_handler(
     bot: Bot,
     msg: Message,
+    user: User,
     mut db: Database,
     forum_id: ChatId,
     scheduler: Scheduler,
@@ -131,7 +141,7 @@ async fn private_handler(
         mapping.sync(msg.id, last_topic);
         db.sync_mapping(mapping, scheduler).await?;
     } else {
-        create_new_topic(bot, msg, db, forum_id).await?;
+        create_new_topic(bot, msg, user, db, forum_id).await?;
     }
     
     Ok(())
@@ -139,15 +149,16 @@ async fn private_handler(
 
 #[instrument(
     name = "Topic handler",
-    skip(bot, msg, db, scheduler),
+    skip(bot, msg, thread_id, db, scheduler),
 )]
 async fn topic_handler(
     bot: Bot,
     msg: Message,
+    thread_id: ThreadId,
     mut db: Database,
     scheduler: Scheduler,
 ) -> HandlerResult {
-    let thread_id = msg.thread_id.expect("infallible").0.0;
+    let thread_id = thread_id.0.0;
     let mut mapping = db.get_mapping(thread_id as i64).await?.ok_or_else(|| {
         tracing::warn!("Mapping not configured: {thread_id}");
         "Mapping not configured"
@@ -156,7 +167,7 @@ async fn topic_handler(
         .map_or(false, |reply| reply.id.0 != thread_id);
     
     let last_private = if with_reply {
-        let reply_to_message_id = msg.reply_to_message().expect("infallible").id.0;
+        let reply_to_message_id = msg.reply_to_message().expect("with reply").id.0;
         let shift = msg.id.0 - reply_to_message_id - 1;
         let reply_msg_id = MessageId(mapping.last_private.0 - shift);
         bot.copy_message(mapping.recipient_chat, msg.chat.id, msg.id)
@@ -173,18 +184,18 @@ async fn topic_handler(
 
 #[instrument(
     name = "Admin command handler",
-    skip(bot, msg, cmd, forum_id, db, scheduler),
+    skip(bot, msg, thread_id, cmd, forum_id, db, scheduler),
 )]
 async fn admin_command_handler(
-    bot: Bot, 
+    bot: Bot,
     msg: Message,
+    thread_id: ThreadId,
     cmd: AdminCommand,  // while 1 command !!!
     forum_id: ChatId, 
     mut db: Database,
     scheduler: Scheduler,
 ) -> HandlerResult {
     if let AdminCommand::DropTopic(forum_name) = cmd {
-        let thread_id = msg.thread_id.expect("infallible");
         if forum_name.is_empty() {
             bot.send_message(
                 msg.chat.id, 
@@ -212,18 +223,17 @@ async fn admin_command_handler(
 
 #[instrument(
     name = "Ban handler",
-    skip(bot, call, db, forum_id, scheduler),
+    skip(bot, call, msg, thread_id, db, forum_id, scheduler),
 )]
 async fn ban_handler(
     bot: Bot, 
     call: CallbackQuery,
+    msg: Message,
+    thread_id: ThreadId,
     mut db: Database, 
     forum_id: ChatId,
     scheduler: Scheduler,
 ) -> HandlerResult {
-    let init_msg_binding = call.message.expect("infallible");
-    let init_msg = init_msg_binding.regular_message().expect("infallible");
-    let thread_id = init_msg.thread_id.expect("infallible");
     if let Some(mapping) = db.get_mapping(thread_id.0.0 as i64).await? {
         // Ban user
         db.ban_user(mapping.recipient_chat.0).await?;
@@ -231,7 +241,7 @@ async fn ban_handler(
         // Drop topic
         let topic_name = format!("🚫 {}", mapping.recipient_chat);
         close_topic(&bot, forum_id, thread_id, &topic_name).await?;
-        bot.send_message(init_msg.chat.id, "🚫 The user was blocked")
+        bot.send_message(msg.chat.id, "🚫 The user was blocked")
             .message_thread_id(thread_id)
             .await?;
     
@@ -241,7 +251,7 @@ async fn ban_handler(
             .await?;
         tracing::info!("User banned: {}", mapping.recipient_chat.0);
     }
-    bot.edit_message_reply_markup(forum_id, init_msg.id)
+    bot.edit_message_reply_markup(forum_id, msg.id)
         .reply_markup(InlineKeyboardMarkup::default())
         .await?;
     
@@ -251,10 +261,10 @@ async fn ban_handler(
 async fn create_new_topic(
     bot: Bot,
     msg: Message,
+    user: User,
     mut db: Database,
     forum_id: ChatId,
 ) -> HandlerResult {
-    let user = msg.from.expect("infallible");
     let topic_icon = *TOPIC_ICON_COLOR.choose(&mut thread_rng()).expect("infallible");
     let topic = bot.create_forum_topic(
         forum_id,
