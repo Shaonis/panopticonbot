@@ -43,7 +43,7 @@ HELP_COMMAND="{TEXT FOR HELP COMMAND}"
 
 ### Optional (for Webhook) ###
 WEBHOOK_URL={YOUR WEBHOOK URL}
-WEBHOOK_PORT={PORT FOR WEBHOOK}  # is also required if webhook is used
+WEBHOOK_LISTENER={WHICH ADDRESS THE BOT WILL LISTEN TO}  # is also required if webhook is used
 
 ### Example ###
 BOT_TOKEN=123456789:AAEQIi5ZhwXuQnwHg0Po6povuMMcC99Vcpc
@@ -54,7 +54,7 @@ START_COMMAND=Hello, ask a question and we will try to answer it as soon as poss
 HELP_COMMAND=All your messages are sent to us. If you need anything, write to us and we will respond.
 
 WEBHOOK_URL=https://your-webhook-url.com
-WEBHOOK_PORT=8443
+WEBHOOK_LISTENER=0.0.0.0:8443
 ```
 
 ### 1. Running in Long-Polling Mode
@@ -74,7 +74,7 @@ In webhook mode, Telegram pushes updates directly to your server, which makes th
 First, add the following environment variables to your .env file:
 ```bash
 WEBHOOK_URL="https://your-webhook-url"
-WEBHOOK_PORT=8443 # or any other available port
+WEBHOOK_PORT=8443  # or any other available port
 ```
 
 And run the bot:
@@ -88,7 +88,7 @@ The bot can also be launched using Docker for easy deployment. You can use Docke
 
 - You may need to modify docker-compose.yaml to specify your volumes or other settings
 - Don't forget to create an .env file with environment variables in the project root directory as shown above
-- If you want to use Webhook, in addition to adding data about it to the .env, also uncomment the ports section in docker-compose.yaml
+- If you want to use Webhook, in addition to adding its details to .env, also set the ports section in docker-compose.yaml
 - Before running Docker Compose, create a Docker image with an appropriate name:
 
 ```bash
