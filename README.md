@@ -2,6 +2,8 @@
 
 **Panopticon Feedback Bot** - Telegram bot that creates a thread in a given forum for each user that writes in it.
 
+[preview](https://github.com/user-attachments/assets/d8ff1995-7a7a-4c59-972d-0df5686a244d)
+
 That's why it has Panopticon in the name - this concept makes it easier for administrators to respond to individual users. This is especially useful in scenarios where it is necessary to have clear dialogs between users and administrators
 
 ## Key Features
